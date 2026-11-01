@@ -101,15 +101,16 @@ section.panel { display: grid; gap: 14px }
 .route i { flex: 1; border-top: 2px dashed var(--muted); min-width: 30px }
 
 /* conversation */
+[hidden] { display: none !important }
 .convo { display: grid; gap: 10px }
 .ln { display: grid; grid-template-columns: 76px 1fr; gap: 10px; align-items: start }
 .ln .who { font-size: 13px; font-weight: 700; display: flex; flex-direction: column; gap: 4px; align-items: center; text-align: center }
 .av.lg { width: 52px; height: 52px; font-size: 20px; box-shadow: 0 0 0 2px var(--card), 0 0 0 3px var(--line) }
 .ln .bub { background: var(--card); border: 1px solid var(--line); border-radius: 4px 14px 14px 14px; padding: 8px 12px; min-width: 0 }
 .ln.now .bub { box-shadow: 0 0 0 2px var(--sun) }
-.reading { display: grid; gap: 4px; font-size: 17px; line-height: 2.1; max-width: 70ch }
-.reading p { margin: 0 }
-.reading small { display: block; font-size: 13.5px; color: var(--muted); line-height: 1.7; font-family: var(--f-body) }
+.reading { display: grid; gap: 14px; font-size: 17px; line-height: 2.1; max-width: 70ch }
+.reading p { margin: 0; text-indent: 1em }
+.reading small { display: block; text-indent: 0; margin-top: 2px; font-size: 13.5px; color: var(--muted); line-height: 1.7; font-family: var(--f-body) }
 .ln.me .bub { background: var(--sun-soft); border-color: transparent }
 .ln.narr .bub { background: transparent; border-style: dashed }
 .ln.narr .ja { font-size: 15px; color: var(--muted) }
@@ -294,7 +295,9 @@ function playAll(kind) {
   const btn = $("[data-playall]");
   if (playing) { playing.stop = true; if (player) player.pause(); speechSynthesis && speechSynthesis.cancel(); playing = null; btn.textContent = ui("playall"); document.querySelectorAll(".ln.now").forEach(x => x.classList.remove("now")); return }
   const les = DATA.lessons[CUR];
-  const lines = (kind || btn.dataset.playall) === "listen" ? les.listening.script : les.conversation.lines;
+  const mode = kind || btn.dataset.playall;
+  const lines = mode === "listen" ? les.listening.script : mode === "read" ? [{ jp: `reading:${les.id}` }] : les.conversation.lines;
+  lines.slice(0, 2).forEach(l => clip(l.jp));
   const run = { stop: false }; playing = run; btn.textContent = ui("stop");
   (async () => {
     for (let i = 0; i < lines.length && !run.stop; i++) {
@@ -302,17 +305,25 @@ function playAll(kind) {
       if (l.speaker === "ハナ") continue;
       document.querySelectorAll(".ln.now").forEach(x => x.classList.remove("now"));
       if (el) { el.classList.add("now"); el.scrollIntoView({ block: "nearest", behavior: "smooth" }) }
+      if (lines[i + 1]) clip(lines[i + 1].jp);  // 先載入下一句，銜接才不會等網路
       await say(l.jp);
-      await new Promise(r => setTimeout(r, 350));
+      if (!run.stop) await new Promise(r => setTimeout(r, 80));
     }
     if (playing === run) { playing = null; btn.textContent = ui("playall"); document.querySelectorAll(".ln.now").forEach(x => x.classList.remove("now")) }
   })();
 }
+const CLIPS = {};
+function clip(text) {
+  const raw = (DATA.audio || {})[text]; if (!raw) return null;
+  const url = REMOTE ? SB(raw) : raw;
+  if (!CLIPS[url]) { CLIPS[url] = new Audio(url); CLIPS[url].preload = "auto" }
+  return CLIPS[url];
+}
 function say(text) {
-  const raw = (DATA.audio || {})[text], url = raw && (REMOTE ? SB(raw) : raw);
-  if (url) {  // ElevenLabs 角色聲音
+  const a = clip(text);
+  if (a) {  // ElevenLabs 角色聲音
     if (player) player.pause();
-    player = new Audio(url);
+    player = a; player.currentTime = 0;
     return new Promise(res => { player.onended = res; player.onerror = res; player.play().catch(res) });
   }
   if (!("speechSynthesis" in window)) return Promise.resolve();
@@ -502,8 +513,8 @@ function listen(les) {
 function read(les) {
   const R = les.reading;
   return `<div class="box"><h3 class="jp">${esc(R.title)} <code>${esc(R.genre_zh || "")}</code></h3><p style="margin:0" class="score">${esc(t(`lesson.${les.id}.extra.intro`, R.intro_zh || ""))}</p>${R.image ? illus(les, R.image) : ""}
-    <div><button class="act ghost" data-toggle="trans">${lang === "ja" ? "中国語訳を表示" : "顯示中文翻譯"}</button></div>
-    <div class="reading">${R.text.map(p => `<p class="ja">${ruby(p.jp)}<button class="say" data-say="${esc(p.jp)}" aria-label="播放">🔊</button><small data-block="trans" hidden>${esc(p.zh)}</small></p>`).join("")}</div></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="act" data-playall="read">${ui("playall")}</button><button class="act ghost" data-toggle="trans">${lang === "ja" ? "中国語訳を表示" : "顯示中文翻譯"}</button></div>
+    <div class="reading">${R.text.map(p => `<p class="ja">${ruby(p.jp)}<small data-block="trans" hidden>${esc(p.zh)}</small></p>`).join("")}</div></div>
     ${quiz(R.questions)}`;
 }
 function quiz(qs) {
