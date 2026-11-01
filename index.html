@@ -220,6 +220,29 @@ summary { cursor: pointer; color: var(--ai) }
 .pf select { font: inherit; font-family: var(--f-jp); border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); padding: 0 4px; margin: 0 2px }
 .pf select.ok { border-color: var(--good); color: var(--good) } .pf select.ng { border-color: var(--bad); color: var(--bad) }
 .reveal { font-family: var(--f-jp) }
+/* 老師用 AI 微調 */
+.ed { position: fixed; inset: 0 0 0 auto; width: min(420px, 100vw); z-index: 30; background: var(--card); border-left: 1px solid var(--line); display: flex; flex-direction: column; box-shadow: -8px 0 24px rgb(0 0 0 / .12) }
+.ed-head { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line) }
+.ed-head b { flex: 1; font-family: var(--f-display); font-size: 16px }
+.ed-body { flex: 1; overflow-y: auto; padding: 16px; display: grid; gap: 12px; align-content: start }
+.ed-msg { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; font-size: 14px }
+.ed-msg.me { background: var(--ai-soft); border-radius: 12px; padding: 8px 12px; justify-self: end; max-width: 90% }
+.ed-msg.err { color: var(--bad) }
+.ed-status { font-size: 13px; color: var(--muted) }
+.ed-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; font-size: 14px }
+.ed-card h4 { margin: 0; font-size: 14px; font-weight: 600; font-family: var(--f-body) }
+.ed-op { display: grid; gap: 4px }
+.ed-op small { color: var(--muted) }
+.ed-old, .ed-new { border-radius: 8px; padding: 4px 8px; overflow-wrap: anywhere; font-family: var(--f-jp); line-height: 1.9 }
+.ed-old { background: var(--bad-soft) }
+.ed-new { background: var(--good-soft) }
+.ed-warn { border-left: 3px solid var(--sun); background: var(--sun-soft); padding: 4px 8px; border-radius: 0 8px 8px 0; font-size: 13px }
+.ed-btns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center }
+.ed-foot { border-top: 1px solid var(--line); padding: 12px 16px; display: grid; gap: 8px }
+.ed textarea, .ed input { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font: inherit; background: var(--paper); color: var(--ink) }
+.ed textarea { min-height: 72px; resize: vertical }
+.ed .act:disabled { opacity: .5 }
+.ed-x { border: 0; background: none; color: var(--muted); font-size: 20px; line-height: 1; padding: 4px 8px }
 .flag { border-left: 3px solid var(--sakura); background: var(--sakura-soft); padding: 8px 12px; border-radius: 0 10px 10px 0; font-size: 14px }
 @media (prefers-reduced-motion: no-preference) { .q, .tile { transition: border-color .15s } }
 </style>
@@ -234,8 +257,10 @@ summary { cursor: pointer; color: var(--ai) }
   </nav>
   <button class="toggle" id="lang" aria-label="切換說明語言">中文 ⇄ 日本語</button>
   <button class="toggle" id="furi" aria-pressed="true">振假名：開</button>
+  <button class="toggle" id="editBtn" hidden></button>
 </div></header>
 <main><div class="wrap" id="app"></div></main>
+<aside class="ed" id="editor" hidden aria-label="AI"></aside>
 
 <script>
 let DATA = /*__DATA__*/null;
@@ -773,9 +798,197 @@ function applyLang() {
   langBtn.textContent = lang === "ja" ? "日本語 → 中文" : "中文 → 日本語";
   document.querySelectorAll("[data-ui]").forEach(el => el.textContent = ui(el.dataset.ui));
 }
-langBtn.onclick = () => { lang = lang === "ja" ? "zh" : "ja"; try { localStorage.setItem("lang", lang) } catch (e) {} applyLang(); if (DATA) route() };
+langBtn.onclick = () => { lang = lang === "ja" ? "zh" : "ja"; try { localStorage.setItem("lang", lang) } catch (e) {} applyLang(); if (DATA) route(); Ed.draw() };
 applyLang();
 window.addEventListener("hashchange", () => { if (playing) playAll(); route() });
+/* ---------------- 老師用 AI 微調（只有分享版，資料要從 Supabase 讀才看得到結果） ---------------- */
+const Ed = (() => {
+  const LS = { get: k => { try { return JSON.parse(localStorage.getItem(k)) } catch (e) { return null } },
+    set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch (e) {} }, del: k => { try { localStorage.removeItem(k) } catch (e) {} } };
+  const T = (zh, ja) => lang === "ja" ? ja : zh;
+  const FN = REMOTE && `${REMOTE.url}/functions/v1/jp-edit-chat`;
+  let auth = LS.get("jp-auth"), me = null, busy = false, status = "";
+  let log = LS.get("jp-edit-log") || [], session = LS.get("jp-edit-session"), events = [], view = "chat", sent = false, loginError = "", history = [];
+  const save = () => { LS.set("jp-edit-log", log.slice(-60)); LS.set("jp-edit-session", session) };
+  const panel = () => $("#editor");
+  const lessonId = () => /^#L\d\d$/.test(location.hash) ? "N5-" + location.hash.slice(1) : null;
+
+  // 登入連結點回來時，token 在網址的 # 後面
+  function readLoginLink() {
+    if (!location.hash.includes("access_token=") && !location.hash.includes("error=")) return false;
+    const q = new URLSearchParams(location.hash.slice(1));
+    if (q.get("access_token")) {
+      auth = { access_token: q.get("access_token"), refresh_token: q.get("refresh_token"), expires_at: Date.now() / 1000 + +(q.get("expires_in") || 3600) };
+      LS.set("jp-auth", auth);
+    } else loginError = q.get("error_description") || q.get("error");
+    history_replace();
+    return true;
+  }
+  function history_replace() { window.history.replaceState(null, "", location.pathname + location.search) }
+
+  async function token() {
+    if (!auth) return null;
+    if (auth.expires_at - Date.now() / 1000 > 60) return auth.access_token;
+    const r = await fetch(`${REMOTE.url}/auth/v1/token?grant_type=refresh_token`, { method: "POST",
+      headers: { apikey: REMOTE.key, "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: auth.refresh_token }) });
+    if (!r.ok) { logout(); return null }
+    const d = await r.json();
+    auth = { access_token: d.access_token, refresh_token: d.refresh_token, expires_at: Date.now() / 1000 + d.expires_in };
+    LS.set("jp-auth", auth);
+    return auth.access_token;
+  }
+  function logout() { auth = null; me = null; LS.del("jp-auth"); draw() }
+
+  async function call(body) {
+    const t = await token();
+    if (!t) throw new Error(T("請先登入", "ログインしてください"));
+    return fetch(FN, { method: "POST", headers: { apikey: REMOTE.key, Authorization: `Bearer ${t}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  }
+  async function callJson(body) {
+    const r = await call(body), d = await r.json().catch(() => ({}));
+    if (r.status === 401) { logout(); throw new Error(T("登入已過期，請重新登入。", "ログインの期限が切れました。もう一度ログインしてください。")) }
+    if (!r.ok) throw new Error(d.error || r.status);
+    return d;
+  }
+
+  const SECTION = { conversation: ["會話", "会話"], vocabulary: ["單字", "単語"], grammar: ["文法", "文法"], exercises: ["練習", "練習"], listening: ["聽力", "聴解"], reading: ["閱讀", "読解"],
+    drills: ["句型操練", "ドリル"], scene: ["場景", "場面"], teacher_notes: ["メモ", "メモ"], objectives: ["學習目標", "学習目標"], can_do: ["能做到的事", "できること"], advanced: ["發展", "発展"], ai_roleplay: ["AI 會話", "AI会話"] };
+  const LEAF = { jp: ["日文", "日本語"], zh: ["中文", "中国語"], note_zh: ["附註", "注"], word: ["單字", "単語"], reading: ["讀音", "読み"], stem: ["題目", "問題文"], q: ["題目", "問題文"], options: ["選項", "選択肢"],
+    answer: ["答案", "答え"], explanation_zh: ["解說", "解説"], notes_zh: ["ポイント", "ポイント"], meaning_zh: ["意思", "意味"], story_zh: ["故事", "ストーリー"], ja: ["日文版", "日本語版"] };
+  function label(path) {
+    if (path[0] === "texts") return `${T("日文說明", "日本語の説明")}：${path[1].split(".").slice(2).join(".")}`;
+    const rest = path.slice(2), out = [];
+    rest.forEach((k, i) => {
+      if (/^\d+$/.test(k)) out.push(rest[i - 1] === "options" ? `${+k + 1}` : ["lines", "script", "text"].includes(rest[i - 1]) ? T(`第 ${+k + 1} ${rest[i - 1] === "text" ? "段" : "句"}`, `${+k + 1}番目`) : T(`第 ${+k + 1} 項`, `${+k + 1}番目`));
+      else if (k === "lines" || k === "script" || k === "text" || k === "items") return;
+      else { const m = SECTION[k] || LEAF[k]; out.push(m ? T(m[0], m[1]) : k) }
+    });
+    return out.join("・");
+  }
+  const STATE = { pending: "", applied: ["已套用", "適用済み"], rejected: ["已略過", "見送り"], merged: ["已併入", "反映済み"] };
+  function card(it, i) {
+    const e = it.edit, st = it.state || "pending";
+    return `<div class="ed-card"><h4>${T("修改提案", "修正案")} #${e.id}：${esc(e.summary)}</h4>
+      ${e.ops.map(op => `<div class="ed-op"><small>${esc(label(op.path))}</small>
+        <div class="ed-old">${op.old == null ? T("（原本沒有）", "（なし）") : ruby(op.old)}</div><div class="ed-new">${ruby(op.new)}</div></div>`).join("")}
+      ${(e.warnings || []).map(w => `<div class="ed-warn">${esc(w)}</div>`).join("")}
+      <div class="ed-btns">${st === "pending" ? `<button class="act" data-ed-apply="${i}">${T("套用", "適用する")}</button><button class="act ghost" data-ed-reject="${i}">${T("不要", "やめる")}</button>`
+        : `<small>${esc(T(...STATE[st]))}</small>${st === "applied" ? `<button class="act ghost" data-ed-revert="${e.id}">${T("復原", "元に戻す")}</button>` : ""}`}</div></div>`;
+  }
+  function drawChat() {
+    return `<div class="ed-body" id="edBody">
+      ${log.length ? "" : `<p class="ed-status">${T("告訴我想改哪裡，例如「第 4 句的翻譯改成比較口語」。我會先給你修改前後的對照，按「套用」才會生效。", "直したいところを教えてください（例：4番目の文の訳をもっと口語的に）。修正の前後を見せますので、「適用する」を押すと反映されます。")}</p>`}
+      ${log.map((it, i) => it.edit ? card(it, i) : `<div class="ed-msg ${it.role === "me" ? "me" : it.role === "err" ? "err" : ""}">${esc(it.text)}</div>`).join("")}
+      ${busy ? `<p class="ed-status" role="status">${esc(status || T("思考中…", "考えています…"))}</p>` : ""}</div>
+      <form class="ed-foot" id="edForm"><textarea id="edText" aria-label="${T("想修改的內容", "修正の内容")}" placeholder="${T("想修改什麼？（Ctrl／⌘＋Enter 送出）", "どこを直しますか？（Ctrl／⌘＋Enterで送信）")}"></textarea>
+        <div class="ed-btns"><button class="act" ${busy ? "disabled" : ""}>${T("送出", "送信")}</button>
+          <button type="button" class="act ghost" data-ed-view="history">${T("修改紀錄", "修正履歴")}</button>
+          <button type="button" class="act ghost" data-ed-new>${T("新對話", "新しい会話")}</button></div></form>`;
+  }
+  function drawHistory() {
+    const L = lessonId();
+    return `<div class="ed-body">${!L ? `<p class="ed-status">${T("打開一課，就能看到那一課的修改紀錄。", "課を開くと、その課の修正履歴が見られます。")}</p>` : !history.length ? `<p class="ed-status">${T("這一課還沒有修改。", "この課の修正はまだありません。")}</p>` :
+      history.map(e => `<div class="ed-card"><h4>#${e.id} ${esc(e.summary)}</h4><small>${esc((e.applied_at || e.created_at || "").slice(0, 16).replace("T", " "))}　${esc(e.author_email || "")}${e.kind === "note" ? "　" + T("留言", "伝言") : e.status === "pending" ? "　" + T("待確認", "確認待ち") : ""}</small>
+        ${e.kind === "edit" && e.status !== "pending" ? `<div class="ed-btns"><button class="act ghost" data-ed-revert="${e.id}">${T("復原", "元に戻す")}</button></div>` : ""}</div>`).join("")}</div>
+      <div class="ed-foot"><div class="ed-btns"><button class="act ghost" data-ed-view="chat">${T("回到對話", "会話に戻る")}</button></div></div>`;
+  }
+  function drawLogin() {
+    return `<form class="ed-body" id="edLogin"><p style="margin:0">${T("用老師的 email 登入。我們會寄一封登入連結給你，不需要密碼。", "先生のメールアドレスでログインします。ログイン用のリンクをお送りします。パスワードは不要です。")}</p>
+      <input type="email" id="edEmail" required autocomplete="email" aria-label="email" placeholder="email">
+      <div class="ed-btns"><button class="act">${T("寄登入連結", "リンクを送る")}</button></div>
+      ${sent ? `<p class="ed-status" role="status">${T("已寄出，請到信箱點連結。", "送信しました。メールのリンクを開いてください。")}</p>` : ""}${loginError ? `<p class="ed-msg err">${esc(loginError)}</p>` : ""}</form>`;
+  }
+  function draw() {
+    const btn = $("#editBtn");
+    if (btn) btn.textContent = auth ? T("AI 微調", "AIで修正") : T("老師登入", "先生ログイン");
+    const el = panel(); if (!el || el.hidden) return;
+    const noPerm = auth && me && !me.editor;
+    el.innerHTML = `<div class="ed-head"><b>${T("AI 微調", "AIで修正")}${lessonId() ? `・${T("第", "第")}${+lessonId().slice(-2)}${T(" 課", "課")}` : ""}</b>
+      ${auth ? `<button class="toggle" data-ed-logout>${T("登出", "ログアウト")}</button>` : ""}<button class="ed-x" data-ed-close aria-label="${T("關閉", "閉じる")}">×</button></div>
+      ${!auth ? drawLogin() : noPerm ? `<div class="ed-body"><p>${T(`這個帳號（${esc(me.email)}）沒有編輯權限，請聯絡課程負責人。`, `このアカウント（${esc(me.email)}）には編集権限がありません。担当者にご連絡ください。`)}</p></div>` : view === "history" ? drawHistory() : drawChat()}`;
+    const b = $("#edBody"); if (b) b.scrollTop = b.scrollHeight;
+  }
+  async function reloadCourse() {
+    const y = window.scrollY, tab = $('#seg button[aria-current="true"]')?.dataset.tab;
+    const r = await fetch(`${REMOTE.url}/rest/v1/rpc/jp_course_bundle`, { method: "POST", headers: { apikey: REMOTE.key, Authorization: `Bearer ${REMOTE.key}`, "Content-Type": "application/json" }, body: JSON.stringify({ p_level: REMOTE.level || "N5" }) });
+    if (!r.ok) return;
+    DATA = await r.json(); initData(); route();
+    if (tab) $(`#seg button[data-tab="${tab}"]`)?.click();
+    window.scrollTo(0, y);
+  }
+  async function send(text) {
+    log.push({ role: "me", text }); busy = true; status = ""; save(); draw();
+    try {
+      const r = await call({ action: "chat", text, lesson: lessonId(), session_id: session, events });
+      if (r.status === 401) { logout(); throw new Error(T("登入已過期，請重新登入。", "ログインの期限が切れました。もう一度ログインしてください。")) }
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || d.message || r.status) }
+      events = [];
+      const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
+      const TOOLS = { read_section: T("讀課程內容…", "課の内容を読んでいます…"), find_text: T("搜尋中…", "検索しています…"), propose_edit: T("整理修改提案…", "修正案をまとめています…"), leave_note: T("留言中…", "伝言しています…") };
+      for (;;) {
+        const { done, value } = await reader.read(); if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n"); buf = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const m = JSON.parse(line);
+          if (m.type === "text") log.push({ role: "ai", text: m.text });
+          else if (m.type === "proposal") log.push({ edit: m.edit, state: "pending" });
+          else if (m.type === "note") log.push({ role: "ai", text: T("（已留言給課程編輯者）", "（編集担当者に伝言しました）") });
+          else if (m.type === "error") log.push({ role: "err", text: m.message });
+          else if (m.type === "status") status = TOOLS[m.tool] || "";
+          else if (m.type === "done") session = m.session_id;
+          if (m.type !== "ping") { save(); draw() }
+        }
+      }
+    } catch (e) { log.push({ role: "err", text: e.message }) }
+    busy = false; status = ""; save(); draw(); $("#edText")?.focus();
+  }
+  async function act(fn, i) {
+    try { await fn(i) } catch (e) { log.push({ role: "err", text: e.message }); view = "chat" }
+    save(); draw();
+  }
+  async function openHistory() {
+    view = "history"; history = [];
+    if (lessonId()) history = await callJson({ action: "history", lesson: lessonId() }).catch(() => []);
+    draw();
+  }
+  async function checkMe() { if (auth) try { me = await callJson({ action: "me" }) } catch (e) {} }
+
+  function init() {
+    if (!REMOTE) return;
+    const opened = readLoginLink();
+    const btn = $("#editBtn"); btn.hidden = false;
+    btn.onclick = async () => { const el = panel(); el.hidden = !el.hidden; if (!el.hidden) await checkMe(); draw() };
+    window.addEventListener("hashchange", () => { if (view === "history") openHistory(); else draw() });
+    panel().addEventListener("submit", async e => {
+      e.preventDefault();
+      if (e.target.id === "edForm") { const t = $("#edText").value.trim(); if (t && !busy) send(t) }
+      if (e.target.id === "edLogin") {
+        sent = false; loginError = "";
+        const r = await fetch(`${REMOTE.url}/auth/v1/otp?redirect_to=${encodeURIComponent(location.origin + location.pathname)}`, { method: "POST",
+          headers: { apikey: REMOTE.key, "Content-Type": "application/json" }, body: JSON.stringify({ email: $("#edEmail").value.trim(), create_user: false }) });
+        if (r.ok) sent = true; else loginError = T("無法寄出。請確認 email 已開通，或稍後再試。", "送信できませんでした。メールアドレスをご確認のうえ、しばらくしてからお試しください。");
+        draw();
+      }
+    });
+    panel().addEventListener("keydown", e => { if (e.target.id === "edText" && e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#edForm").requestSubmit() } });
+    panel().addEventListener("click", e => {
+      const q = a => e.target.closest(`[${a}]`);
+      if (q("data-ed-close")) { panel().hidden = true; return }
+      if (q("data-ed-logout")) return logout();
+      if (q("data-ed-new")) { log = []; session = null; events = []; save(); return draw() }
+      if (q("data-ed-view")) { const v = q("data-ed-view").dataset.edView; if (v === "history") openHistory(); else { view = v; draw() } return }
+      const ap = q("data-ed-apply"), rj = q("data-ed-reject"), rv = q("data-ed-revert");
+      if (ap) return act(async i => { const it = log[i]; await callJson({ action: "apply", id: it.edit.id }); it.state = "applied"; events.push(`（老師已套用提案 #${it.edit.id}）`); await reloadCourse() }, +ap.dataset.edApply);
+      if (rj) return act(async i => { const it = log[i]; await callJson({ action: "reject", id: it.edit.id }); it.state = "rejected"; events.push(`（老師沒有採用提案 #${it.edit.id}）`) }, +rj.dataset.edReject);
+      if (rv) return act(async id => { await callJson({ action: "revert", id }); log.filter(x => x.edit && x.edit.id === id).forEach(x => x.state = "rejected"); events.push(`（老師復原了提案 #${id}）`); await reloadCourse(); if (view === "history") await openHistory() }, +rv.dataset.edRevert);
+    });
+    if (opened) { panel().hidden = false; checkMe().then(draw) }
+    draw();
+  }
+  return { init, draw };
+})();
 async function boot() {
   if (!DATA && REMOTE) {
     app.innerHTML = `<p class="score">${lang === "ja" ? "Supabase からデータを読み込んでいます…" : "正在從 Supabase 讀取課程資料…"}</p>`;
@@ -792,6 +1005,7 @@ async function boot() {
   initData();
   route();
 }
+Ed.init();
 boot();
 </script>
 
