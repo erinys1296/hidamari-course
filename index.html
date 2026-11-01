@@ -242,6 +242,8 @@ summary { cursor: pointer; color: var(--ai) }
 .ed textarea, .ed input { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font: inherit; background: var(--paper); color: var(--ink) }
 .ed textarea { min-height: 72px; resize: vertical }
 .ed .act:disabled { opacity: .5 }
+.ed-field { display: grid; gap: 4px; font-size: 13px; color: var(--muted) }
+.ed-field input { color: var(--ink); font-size: 15px }
 .ed-x { border: 0; background: none; color: var(--muted); font-size: 20px; line-height: 1; padding: 4px 8px }
 .flag { border-left: 3px solid var(--sakura); background: var(--sakura-soft); padding: 8px 12px; border-radius: 0 10px 10px 0; font-size: 14px }
 @media (prefers-reduced-motion: no-preference) { .q, .tile { transition: border-color .15s } }
@@ -809,6 +811,7 @@ const Ed = (() => {
   const FN = REMOTE && `${REMOTE.url}/functions/v1/jp-edit-chat`;
   let auth = LS.get("jp-auth"), me = null, busy = false, status = "";
   let log = LS.get("jp-edit-log") || [], session = LS.get("jp-edit-session"), events = [], view = "chat", sent = false, loginError = "", history = [];
+  let loginMode = "login", recovery = false, pwError = "", pwDone = false;
   const save = () => { LS.set("jp-edit-log", log.slice(-60)); LS.set("jp-edit-session", session) };
   const panel = () => $("#editor");
   const lessonId = () => /^#L\d\d$/.test(location.hash) ? "N5-" + location.hash.slice(1) : null;
@@ -818,9 +821,9 @@ const Ed = (() => {
     if (!location.hash.includes("access_token=") && !location.hash.includes("error=")) return false;
     const q = new URLSearchParams(location.hash.slice(1));
     if (q.get("access_token")) {
-      auth = { access_token: q.get("access_token"), refresh_token: q.get("refresh_token"), expires_at: Date.now() / 1000 + +(q.get("expires_in") || 3600) };
-      LS.set("jp-auth", auth);
-    } else loginError = q.get("error_description") || q.get("error");
+      setSession({ access_token: q.get("access_token"), refresh_token: q.get("refresh_token"), expires_in: +(q.get("expires_in") || 3600) });
+      if (q.get("type") === "recovery") { recovery = true; view = "password" }
+    } else { loginError = T("這個連結已經失效，請重新申請。", "このリンクは無効です。もう一度お申し込みください。"); loginMode = "forgot" }
     history_replace();
     return true;
   }
@@ -833,11 +836,10 @@ const Ed = (() => {
       headers: { apikey: REMOTE.key, "Content-Type": "application/json" }, body: JSON.stringify({ refresh_token: auth.refresh_token }) });
     if (!r.ok) { logout(); return null }
     const d = await r.json();
-    auth = { access_token: d.access_token, refresh_token: d.refresh_token, expires_at: Date.now() / 1000 + d.expires_in };
-    LS.set("jp-auth", auth);
+    setSession(d);
     return auth.access_token;
   }
-  function logout() { auth = null; me = null; LS.del("jp-auth"); draw() }
+  function logout() { auth = null; me = null; view = "chat"; recovery = false; LS.del("jp-auth"); draw() }
 
   async function call(body) {
     const t = await token();
@@ -893,10 +895,58 @@ const Ed = (() => {
       <div class="ed-foot"><div class="ed-btns"><button class="act ghost" data-ed-view="chat">${T("回到對話", "会話に戻る")}</button></div></div>`;
   }
   function drawLogin() {
-    return `<form class="ed-body" id="edLogin"><p style="margin:0">${T("用老師的 email 登入。我們會寄一封登入連結給你，不需要密碼。", "先生のメールアドレスでログインします。ログイン用のリンクをお送りします。パスワードは不要です。")}</p>
-      <input type="email" id="edEmail" required autocomplete="email" aria-label="email" placeholder="email">
-      <div class="ed-btns"><button class="act">${T("寄登入連結", "リンクを送る")}</button></div>
-      ${sent ? `<p class="ed-status" role="status">${T("已寄出，請到信箱點連結。", "送信しました。メールのリンクを開いてください。")}</p>` : ""}${loginError ? `<p class="ed-msg err">${esc(loginError)}</p>` : ""}</form>`;
+    if (loginMode === "forgot") return `<form class="ed-body" id="edForgot"><p style="margin:0">${T("輸入帳號的 email，我們會寄一封重設密碼的連結給你。", "アカウントのメールアドレスを入力してください。パスワード再設定のリンクをお送りします。")}</p>
+      <label class="ed-field">email<input type="email" id="edEmail" required autocomplete="username"></label>
+      <div class="ed-btns"><button class="act">${T("寄重設連結", "リンクを送る")}</button><button type="button" class="act ghost" data-ed-mode="login">${T("回到登入", "ログインに戻る")}</button></div>
+      ${sent ? `<p class="ed-status" role="status">${T("如果這個 email 有帳號，重設連結已經寄出。請到信箱查看。", "このメールアドレスのアカウントがあれば、リンクを送信しました。メールをご確認ください。")}</p>` : ""}${loginError ? `<p class="ed-msg err">${esc(loginError)}</p>` : ""}</form>`;
+    return `<form class="ed-body" id="edLogin">
+      <label class="ed-field">email<input type="email" id="edEmail" required autocomplete="username"></label>
+      <label class="ed-field">${T("密碼", "パスワード")}<input type="password" id="edPass" required autocomplete="current-password"></label>
+      <div class="ed-btns"><button class="act">${T("登入", "ログイン")}</button><button type="button" class="toggle" data-ed-mode="forgot">${T("忘記密碼", "パスワードを忘れた場合")}</button></div>
+      ${loginError ? `<p class="ed-msg err" role="alert">${esc(loginError)}</p>` : ""}</form>`;
+  }
+  function drawPassword() {
+    if (pwDone) return `<div class="ed-body"><p class="ed-status" role="status">${T("密碼已更新。下次登入請用新密碼。", "パスワードを更新しました。次回から新しいパスワードでログインしてください。")}</p>
+      <div class="ed-btns"><button class="act" data-ed-view="chat">${T("回到對話", "会話に戻る")}</button></div></div>`;
+    return `<form class="ed-body" id="edPw"><h4 style="margin:0">${recovery ? T("設定新密碼", "新しいパスワードの設定") : T("修改密碼", "パスワードの変更")}</h4>
+      ${recovery ? "" : `<label class="ed-field">${T("目前的密碼", "現在のパスワード")}<input type="password" id="edPwOld" required autocomplete="current-password"></label>`}
+      <label class="ed-field">${T("新密碼（至少 8 個字元）", "新しいパスワード（8文字以上）")}<input type="password" id="edPwNew" required minlength="8" autocomplete="new-password"></label>
+      <label class="ed-field">${T("再輸入一次新密碼", "新しいパスワード（確認）")}<input type="password" id="edPwNew2" required minlength="8" autocomplete="new-password"></label>
+      <div class="ed-btns"><button class="act">${T("儲存", "保存")}</button>${recovery ? "" : `<button type="button" class="act ghost" data-ed-view="chat">${T("取消", "キャンセル")}</button>`}</div>
+      ${pwError ? `<p class="ed-msg err" role="alert">${esc(pwError)}</p>` : ""}</form>`;
+  }
+  function setSession(d) {
+    auth = { access_token: d.access_token, refresh_token: d.refresh_token, expires_at: Date.now() / 1000 + (d.expires_in || 3600) };
+    LS.set("jp-auth", auth);
+  }
+  const authFetch = (path, body, method = "POST", bearer = REMOTE.key) => fetch(`${REMOTE.url}/auth/v1/${path}`, { method,
+    headers: { apikey: REMOTE.key, Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  // 登入不成功時，不分辨是帳號還是密碼錯，避免讓人試出有哪些帳號
+  function authError(r) {
+    if (r.status === 400) return T("email 或密碼不正確。", "メールアドレスまたはパスワードが正しくありません。");
+    if (r.status === 429) return T("嘗試太多次，請稍後再試。", "試行回数が多すぎます。しばらくしてからお試しください。");
+    return T("目前無法處理，請稍後再試。", "現在処理できません。しばらくしてからお試しください。");
+  }
+  async function changePassword() {
+    pwError = ""; pwDone = false;
+    const oldPw = $("#edPwOld")?.value, a = $("#edPwNew").value, b = $("#edPwNew2").value;
+    if (a !== b) { pwError = T("兩次輸入的新密碼不一樣。", "新しいパスワードが一致しません。"); return draw() }
+    if (!recovery && a === oldPw) { pwError = T("新密碼要和目前的不同。", "現在と異なるパスワードにしてください。"); return draw() }
+    if (!recovery) { // 先確認目前的密碼，別人拿到開著的電腦也改不了
+      const email = me?.email || (await checkMe(), me?.email);
+      const r = await authFetch("token?grant_type=password", { email, password: oldPw });
+      if (!r.ok) { pwError = r.status === 400 ? T("目前的密碼不正確。", "現在のパスワードが正しくありません。") : authError(r); return draw() }
+      setSession(await r.json());
+    }
+    const t = await token();
+    const r = await authFetch("user", { password: a }, "PUT", t);
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      pwError = d.error_code === "same_password" ? T("新密碼要和目前的不同。", "現在と異なるパスワードにしてください。")
+        : d.error_code === "weak_password" ? T("這個密碼太簡單，請換一個。", "このパスワードは簡単すぎます。別のものにしてください。") : authError(r);
+      return draw();
+    }
+    recovery = false; pwDone = true; view = "password"; draw();
   }
   function draw() {
     const btn = $("#editBtn");
@@ -904,8 +954,8 @@ const Ed = (() => {
     const el = panel(); if (!el || el.hidden) return;
     const noPerm = auth && me && !me.editor;
     el.innerHTML = `<div class="ed-head"><b>${T("AI 微調", "AIで修正")}${lessonId() ? `・${T("第", "第")}${+lessonId().slice(-2)}${T(" 課", "課")}` : ""}</b>
-      ${auth ? `<button class="toggle" data-ed-logout>${T("登出", "ログアウト")}</button>` : ""}<button class="ed-x" data-ed-close aria-label="${T("關閉", "閉じる")}">×</button></div>
-      ${!auth ? drawLogin() : noPerm ? `<div class="ed-body"><p>${T(`這個帳號（${esc(me.email)}）沒有編輯權限，請聯絡課程負責人。`, `このアカウント（${esc(me.email)}）には編集権限がありません。担当者にご連絡ください。`)}</p></div>` : view === "history" ? drawHistory() : drawChat()}`;
+      ${auth && !recovery ? `<button class="toggle" data-ed-pw>${T("改密碼", "パスワード変更")}</button>` : ""}${auth ? `<button class="toggle" data-ed-logout>${T("登出", "ログアウト")}</button>` : ""}<button class="ed-x" data-ed-close aria-label="${T("關閉", "閉じる")}">×</button></div>
+      ${!auth ? drawLogin() : view === "password" ? drawPassword() : noPerm ? `<div class="ed-body"><p>${T(`這個帳號（${esc(me.email)}）沒有編輯權限，請聯絡課程負責人。`, `このアカウント（${esc(me.email)}）には編集権限がありません。担当者にご連絡ください。`)}</p></div>` : view === "history" ? drawHistory() : drawChat()}`;
     const b = $("#edBody"); if (b) b.scrollTop = b.scrollHeight;
   }
   async function reloadCourse() {
@@ -965,18 +1015,26 @@ const Ed = (() => {
       e.preventDefault();
       if (e.target.id === "edForm") { const t = $("#edText").value.trim(); if (t && !busy) send(t) }
       if (e.target.id === "edLogin") {
-        sent = false; loginError = "";
-        const r = await fetch(`${REMOTE.url}/auth/v1/otp?redirect_to=${encodeURIComponent(location.origin + location.pathname)}`, { method: "POST",
-          headers: { apikey: REMOTE.key, "Content-Type": "application/json" }, body: JSON.stringify({ email: $("#edEmail").value.trim(), create_user: false }) });
-        if (r.ok) sent = true; else loginError = T("無法寄出。請確認 email 已開通，或稍後再試。", "送信できませんでした。メールアドレスをご確認のうえ、しばらくしてからお試しください。");
+        loginError = "";
+        const r = await authFetch("token?grant_type=password", { email: $("#edEmail").value.trim(), password: $("#edPass").value });
+        if (r.ok) { setSession(await r.json()); await checkMe() } else loginError = authError(r);
         draw();
       }
+      if (e.target.id === "edForgot") {
+        sent = false; loginError = "";
+        const r = await authFetch(`recover?redirect_to=${encodeURIComponent(location.origin + location.pathname)}`, { email: $("#edEmail").value.trim() });
+        if (r.ok) sent = true; else loginError = authError(r);
+        draw();
+      }
+      if (e.target.id === "edPw") changePassword();
     });
     panel().addEventListener("keydown", e => { if (e.target.id === "edText" && e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#edForm").requestSubmit() } });
     panel().addEventListener("click", e => {
       const q = a => e.target.closest(`[${a}]`);
       if (q("data-ed-close")) { panel().hidden = true; return }
       if (q("data-ed-logout")) return logout();
+      if (q("data-ed-pw")) { view = "password"; pwError = ""; pwDone = false; return draw() }
+      if (q("data-ed-mode")) { loginMode = q("data-ed-mode").dataset.edMode; sent = false; loginError = ""; return draw() }
       if (q("data-ed-new")) { log = []; session = null; events = []; save(); return draw() }
       if (q("data-ed-view")) { const v = q("data-ed-view").dataset.edView; if (v === "history") openHistory(); else { view = v; draw() } return }
       const ap = q("data-ed-apply"), rj = q("data-ed-reject"), rv = q("data-ed-revert");
