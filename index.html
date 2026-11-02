@@ -176,6 +176,14 @@ td.ja { font-family: var(--f-jp); font-size: 16px; white-space: nowrap }
 .msg.ai { background: var(--card); border: 1px solid var(--line); justify-self: start; font-family: var(--f-jp) }
 .msg.you { background: var(--ai); color: var(--card); justify-self: end }
 .msg.sys { justify-self: center; font-size: 12.5px; color: var(--muted); background: none; padding: 0 }
+.msg .rp-zh { display: block; font-family: var(--f-sans, inherit); font-size: 13px; color: var(--muted); line-height: 1.6 }
+body.no-zh .msg .rp-zh { display: none }
+.msg.fix, .msg.hint { justify-self: start; width: 85%; background: var(--paper); border: 1px dashed var(--line); font-size: 13.5px; line-height: 1.7 }
+.msg.fix s { color: var(--muted) }
+.msg.fix b { font-family: var(--f-jp) }
+.msg.hint button { display: block; width: 100%; text-align: left; background: none; border: 0; border-top: 1px solid var(--line); padding: 6px 0; font: inherit; color: inherit; cursor: pointer }
+.msg.hint button:first-of-type { border-top: 0 }
+.msg.hint .ja { display: block; font-family: var(--f-jp); margin-top: 2px }
 .composer { display: flex; gap: 8px }
 .composer input { flex: 1; min-width: 0; border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: 8px 14px; font: inherit; font-family: var(--f-jp); color: var(--ink) }
 details { font-size: 13.5px }
@@ -695,6 +703,7 @@ function ai(les) {
     <div style="display:grid;gap:10px;align-content:start;min-width:0">
       <div class="chat" id="chat"><div class="msg ai">${esc(r.opening_line)}</div></div>
       <form class="composer" id="composer"><input id="ai-input" placeholder="用日文回答（打不出來可以先打中文）" autocomplete="off"><button class="act" id="ai-send">送出</button></form>
+      ${REMOTE ? `<div><button type="button" class="act ghost" id="ai-hint">不知道要說什麼</button></div>` : ""}
       <div class="score" id="ai-note">正在連線 AI…</div>
     </div></div>`;
 }
@@ -704,17 +713,8 @@ function bindAI(les) {
   const turns = [{ role: "user", content: r.system_prompt + "\n\n（你的開場白已經顯示給學習者，接下來請回應學習者。）" }, { role: "assistant", content: r.opening_line }];
   const add = (cls, text) => { const d = document.createElement("div"); d.className = "msg " + cls; d.textContent = text; chat.append(d); chat.scrollTop = chat.scrollHeight; return d };
   let sample = null;
-  if (REMOTE) {  // 分享頁：透過 jp-roleplay 接 OpenAI，要登入
-    sample = (msgs, { onText }) => Ed.roleplay(les.id, msgs.slice(1), onText);
-    note.textContent = "";
-    const showNote = () => {
-      if (Ed.signedIn()) { note.textContent = "AI 會照「已學文法」回應你。"; return }
-      note.innerHTML = `要先登入才能練習。<button type="button" class="act ghost" id="ai-login">登入</button>`;
-      note.querySelector("#ai-login").onclick = () => Ed.open();
-    };
-    showNote();
-    Ed.onAuth(showNote);
-  } else samplePromise.then(s => {
+  if (REMOTE) return bindRoleplay(les, { chat, form, input, note, send, add });
+  samplePromise.then(s => {
     sample = s;
     if (s) note.textContent = "AI 會照「已學文法」回應你。第一次送出時會詢問是否允許使用 Claude。";
     else { note.textContent = "這個預覽沒有連上 AI。用 claude.ai 開這個頁面就能真的對話；在你的 app 裡，把左邊的 system prompt 接到你選的 LLM 即可。"; input.disabled = send.disabled = true }
@@ -729,10 +729,55 @@ function bindAI(les) {
       bubble.textContent = reply; turns.push({ role: "assistant", content: reply });
     } catch (err) {
       bubble.remove(); turns.pop();
-      const msg = err.shown || { not_granted: "你沒有允許這個頁面使用 Claude，AI 會話已關閉。", sampling_disabled: "這個帳號不能使用 Claude。", rate_limited: "使用太頻繁了，請稍後再試。" }[err.code] || "AI 沒有回應，請再送一次。";
+      const msg = { not_granted: "你沒有允許這個頁面使用 Claude，AI 會話已關閉。", sampling_disabled: "這個帳號不能使用 Claude。", rate_limited: "使用太頻繁了，請稍後再試。" }[err.code] || "AI 沒有回應，請再送一次。";
       add("sys", msg);
       if (err.code === "not_granted" || err.code === "sampling_disabled") input.disabled = send.disabled = true;
     } finally { if (!input.disabled) send.disabled = false }
+  };
+}
+
+// 分享頁：透過 jp-roleplay 接 OpenAI，要登入。回覆會分開日文、翻譯、糾正，之後才能只念日文
+function bindRoleplay(les, { chat, form, input, note, send, add }) {
+  const r = les.ai_roleplay, hintBtn = $("#ai-hint"), MAX = 40;
+  const turns = [{ role: "assistant", content: r.opening_line }];
+  const html = (cls, h) => { const d = add(cls, ""); d.innerHTML = h; chat.scrollTop = chat.scrollHeight; return d };
+  const showNote = () => {
+    if (Ed.signedIn()) { note.textContent = "AI 會照「已學文法」回應你，也會指出說錯的地方。"; return }
+    note.innerHTML = `要先登入才能練習。<button type="button" class="act ghost" id="ai-login">登入</button>`;
+    note.querySelector("#ai-login").onclick = () => Ed.open();
+  };
+  showNote();
+  Ed.onAuth(showNote);
+  const lock = on => { send.disabled = hintBtn.disabled = on };
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const text = input.value.trim(); if (!text || send.disabled) return;
+    input.value = ""; const mine = add("you", text); turns.push({ role: "user", content: text });
+    const wait = add("ai", "……"); lock(true);
+    try {
+      const d = await Ed.roleplay({ action: "reply", lesson: les.id, turns: turns.slice(-MAX) });
+      wait.remove();
+      turns.push({ role: "assistant", content: d.reply_ja });
+      html("ai", `${ruby(d.reply_ja)}<span class="rp-zh">${esc(d.reply_zh)}</span>`);
+      if (d.corrections.length) html("fix", d.corrections.map(c => `💡 <s>${esc(c.wrong)}</s> → <b>${ruby(c.right)}</b><br>${esc(c.why_zh)}`).join("<br>"));
+      if (d.feedback_zh) add("fix", d.feedback_zh);
+    } catch (err) {
+      wait.remove(); mine.remove(); turns.pop();
+      input.value = text;
+      add("sys", err.shown || "AI 沒有回應，請再送一次。");
+    } finally { lock(false) }
+  };
+  hintBtn.onclick = async () => {
+    const wait = add("sys", "想想可以怎麼接…"); lock(true);
+    try {
+      const d = await Ed.roleplay({ action: "hint", lesson: les.id, turns: turns.slice(-MAX) });
+      wait.remove();
+      const box = html("hint", `<small>想一想怎麼用日文說，點一下可以看範例：</small>${d.hints.map(h => `<button type="button">${esc(h.zh)}<span class="ja" hidden>${ruby(h.ja)}</span></button>`).join("")}`);
+      box.querySelectorAll("button").forEach(b => { b.onclick = () => { b.querySelector(".ja").hidden = false; chat.scrollTop = chat.scrollHeight } });
+    } catch (err) {
+      wait.remove();
+      add("sys", err.shown || "AI 沒有回應，請再送一次。");
+    } finally { lock(false) }
   };
 }
 
@@ -1078,32 +1123,15 @@ const Ed = (() => {
     if (opened) { panel().hidden = false; checkMe().then(draw) }
     draw();
   }
-  // AI 對話練習（jp-roleplay）：一行一個 JSON，邊收邊顯示
-  async function roleplay(lesson, turns, onText) {
+  // AI 對話練習（jp-roleplay）
+  async function roleplay(body) {
     const t = await token();
     if (!t) { open(); throw { shown: "請先登入。" } }
-    const r = await fetch(`${REMOTE.url}/functions/v1/jp-roleplay`, { method: "POST", headers: { apikey: REMOTE.key, Authorization: `Bearer ${t}`, "Content-Type": "application/json" }, body: JSON.stringify({ lesson, turns }) });
-    if (!r.ok) {
-      const d = await r.json().catch(() => ({}));
-      if (r.status === 401) { logout(); open() }
-      throw { shown: d.error || "AI 沒有回應，請再送一次。" };
-    }
-    const reader = r.body.getReader(), dec = new TextDecoder();
-    let buf = "", text = "";
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split("\n"); buf = lines.pop();
-      for (const l of lines) {
-        if (!l.trim()) continue;
-        const m = JSON.parse(l);
-        if (m.type === "text") { text += m.text; onText({ text }) }
-        else if (m.type === "error") throw { shown: m.message };
-      }
-    }
-    if (!text) throw { shown: "AI 沒有回應，請再送一次。" };
-    return { text };
+    const r = await fetch(`${REMOTE.url}/functions/v1/jp-roleplay`, { method: "POST", headers: { apikey: REMOTE.key, Authorization: `Bearer ${t}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 401) { logout(); open() }
+    if (!r.ok) throw { shown: d.error || "AI 沒有回應，請再送一次。" };
+    return d;
   }
   async function open() { panel().hidden = false; await checkMe(); draw() }
   return { init, draw, roleplay, open, signedIn: () => !!auth, onAuth: f => { authListener = f } };
