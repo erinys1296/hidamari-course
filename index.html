@@ -314,7 +314,7 @@ const EMOJI = {
   "L02-card-book": "🐈📖👓", "L02-card-buy": "🏪☕", "L10-cover": "🗺️🚲📱", "L10-chopsticks": "🍜🥢", "L10-pay": "📱🚉",
   "L10-camera": "📷⛩️", "L10-confused": "❓🚃🚌"
 };
-const imgUrl = id => !HAS.has(id) ? null : REMOTE ? SB(`course-images/web/${id}.jpg`) : `img/${id}.jpg`;
+const imgUrl = id => !HAS.has(id) ? null : REMOTE ? SB(`course-images/web/${id}.jpg`) + (DATA.image_v?.[id] ? `?v=${DATA.image_v[id]}` : "") : `img/${id}.jpg`;
 let furigana = true;
 try { furigana = localStorage.getItem("furi") !== "0" } catch (e) {}
 
