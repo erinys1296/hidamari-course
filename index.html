@@ -704,7 +704,17 @@ function bindAI(les) {
   const turns = [{ role: "user", content: r.system_prompt + "\n\n（你的開場白已經顯示給學習者，接下來請回應學習者。）" }, { role: "assistant", content: r.opening_line }];
   const add = (cls, text) => { const d = document.createElement("div"); d.className = "msg " + cls; d.textContent = text; chat.append(d); chat.scrollTop = chat.scrollHeight; return d };
   let sample = null;
-  samplePromise.then(s => {
+  if (REMOTE) {  // 分享頁：透過 jp-roleplay 接 OpenAI，要登入
+    sample = (msgs, { onText }) => Ed.roleplay(les.id, msgs.slice(1), onText);
+    note.textContent = "";
+    const showNote = () => {
+      if (Ed.signedIn()) { note.textContent = "AI 會照「已學文法」回應你。"; return }
+      note.innerHTML = `要先登入才能練習。<button type="button" class="act ghost" id="ai-login">登入</button>`;
+      note.querySelector("#ai-login").onclick = () => Ed.open();
+    };
+    showNote();
+    Ed.onAuth(showNote);
+  } else samplePromise.then(s => {
     sample = s;
     if (s) note.textContent = "AI 會照「已學文法」回應你。第一次送出時會詢問是否允許使用 Claude。";
     else { note.textContent = "這個預覽沒有連上 AI。用 claude.ai 開這個頁面就能真的對話；在你的 app 裡，把左邊的 system prompt 接到你選的 LLM 即可。"; input.disabled = send.disabled = true }
@@ -719,7 +729,7 @@ function bindAI(les) {
       bubble.textContent = reply; turns.push({ role: "assistant", content: reply });
     } catch (err) {
       bubble.remove(); turns.pop();
-      const msg = { not_granted: "你沒有允許這個頁面使用 Claude，AI 會話已關閉。", sampling_disabled: "這個帳號不能使用 Claude。", rate_limited: "使用太頻繁了，請稍後再試。" }[err.code] || "AI 沒有回應，請再送一次。";
+      const msg = err.shown || { not_granted: "你沒有允許這個頁面使用 Claude，AI 會話已關閉。", sampling_disabled: "這個帳號不能使用 Claude。", rate_limited: "使用太頻繁了，請稍後再試。" }[err.code] || "AI 沒有回應，請再送一次。";
       add("sys", msg);
       if (err.code === "not_granted" || err.code === "sampling_disabled") input.disabled = send.disabled = true;
     } finally { if (!input.disabled) send.disabled = false }
@@ -829,6 +839,7 @@ const Ed = (() => {
   }
   function history_replace() { window.history.replaceState(null, "", location.pathname + location.search) }
 
+  let authListener = null;
   async function token() {
     if (!auth) return null;
     if (auth.expires_at - Date.now() / 1000 > 60) return auth.access_token;
@@ -839,7 +850,7 @@ const Ed = (() => {
     setSession(d);
     return auth.access_token;
   }
-  function logout() { auth = null; me = null; view = "chat"; recovery = false; LS.del("jp-auth"); draw() }
+  function logout() { auth = null; me = null; view = "chat"; recovery = false; LS.del("jp-auth"); authListener?.(); draw() }
 
   async function call(body) {
     const t = await token();
@@ -868,6 +879,19 @@ const Ed = (() => {
     return out.join("・");
   }
   const STATE = { pending: "", applied: ["已套用", "適用済み"], rejected: ["已略過", "見送り"], merged: ["已併入", "反映済み"] };
+  function voiceLine(it, i) {
+    const v = it.voice; if (!v) return "";
+    if (v === "busy") return `<p class="ed-status" role="status">${T("配音中…", "音声を作成しています…")}</p>`;
+    if (v.error || v.failed?.length) return `<div class="ed-warn">${T("配音失敗，文字已經改好，目前先用瀏覽器的語音。", "音声の作成に失敗しました。文章は修正済みで、今はブラウザの音声で再生します。")}<div class="ed-btns"><button class="act ghost" data-ed-voice="${i}">${T("重新配音", "もう一度作成")}</button></div></div>`;
+    if (v.over_limit?.length) return `<div class="ed-warn">${T("本月的配音字數已達上限，這段先用瀏覽器的語音。", "今月の音声作成の上限に達しました。この部分はブラウザの音声で再生します。")}</div>`;
+    return v.voiced + v.reused ? `<p class="ed-status" role="status">${T("配音已更新", "音声を更新しました")}</p>` : "";
+  }
+  // 文字已經生效，配音另外跑；失敗也不會影響修改
+  async function runVoice(it, id) {
+    it.voice = "busy"; save(); draw();
+    try { it.voice = await callJson({ action: "voice", id }); await reloadCourse() }
+    catch (e) { it.voice = { error: e.message } }
+  }
   function card(it, i) {
     const e = it.edit, st = it.state || "pending";
     return `<div class="ed-card"><h4>${T("修改提案", "修正案")} #${e.id}：${esc(e.summary)}</h4>
@@ -875,7 +899,8 @@ const Ed = (() => {
         <div class="ed-old">${op.old == null ? T("（原本沒有）", "（なし）") : ruby(op.old)}</div><div class="ed-new">${ruby(op.new)}</div></div>`).join("")}
       ${(e.warnings || []).map(w => `<div class="ed-warn">${esc(w)}</div>`).join("")}
       <div class="ed-btns">${st === "pending" ? `<button class="act" data-ed-apply="${i}">${T("套用", "適用する")}</button><button class="act ghost" data-ed-reject="${i}">${T("不要", "やめる")}</button>`
-        : `<small>${esc(T(...STATE[st]))}</small>${st === "applied" ? `<button class="act ghost" data-ed-revert="${e.id}">${T("復原", "元に戻す")}</button>` : ""}`}</div></div>`;
+        : `<small>${esc(T(...STATE[st]))}</small>${st === "applied" ? `<button class="act ghost" data-ed-revert="${e.id}">${T("復原", "元に戻す")}</button>` : ""}`}</div>
+      ${voiceLine(it, i)}</div>`;
   }
   function drawChat() {
     return `<div class="ed-body" id="edBody">
@@ -918,6 +943,7 @@ const Ed = (() => {
   function setSession(d) {
     auth = { access_token: d.access_token, refresh_token: d.refresh_token, expires_at: Date.now() / 1000 + (d.expires_in || 3600) };
     LS.set("jp-auth", auth);
+    authListener?.();
   }
   const authFetch = (path, body, method = "POST", bearer = REMOTE.key) => fetch(`${REMOTE.url}/auth/v1/${path}`, { method,
     headers: { apikey: REMOTE.key, Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -1038,14 +1064,49 @@ const Ed = (() => {
       if (q("data-ed-new")) { log = []; session = null; events = []; save(); return draw() }
       if (q("data-ed-view")) { const v = q("data-ed-view").dataset.edView; if (v === "history") openHistory(); else { view = v; draw() } return }
       const ap = q("data-ed-apply"), rj = q("data-ed-reject"), rv = q("data-ed-revert");
-      if (ap) return act(async i => { const it = log[i]; await callJson({ action: "apply", id: it.edit.id }); it.state = "applied"; events.push(`（老師已套用提案 #${it.edit.id}）`); await reloadCourse() }, +ap.dataset.edApply);
+      if (ap) return act(async i => { const it = log[i]; await callJson({ action: "apply", id: it.edit.id }); it.state = "applied"; events.push(`（老師已套用提案 #${it.edit.id}）`); await reloadCourse(); await runVoice(it, it.edit.id) }, +ap.dataset.edApply);
       if (rj) return act(async i => { const it = log[i]; await callJson({ action: "reject", id: it.edit.id }); it.state = "rejected"; events.push(`（老師沒有採用提案 #${it.edit.id}）`) }, +rj.dataset.edReject);
-      if (rv) return act(async id => { await callJson({ action: "revert", id }); log.filter(x => x.edit && x.edit.id === id).forEach(x => x.state = "rejected"); events.push(`（老師復原了提案 #${id}）`); await reloadCourse(); if (view === "history") await openHistory() }, +rv.dataset.edRevert);
+      if (rv) return act(async id => {
+        const rev = await callJson({ action: "revert", id }), its = log.filter(x => x.edit && x.edit.id === id);
+        its.forEach(x => x.state = "rejected"); events.push(`（老師復原了提案 #${id}）`); await reloadCourse();
+        if (its[0]) { its[0].revertId = rev.id; await runVoice(its[0], rev.id) } else await callJson({ action: "voice", id: rev.id }).then(reloadCourse).catch(() => {});
+        if (view === "history") await openHistory();
+      }, +rv.dataset.edRevert);
+      const vo = q("data-ed-voice");
+      if (vo) return act(i => runVoice(log[i], log[i].revertId || log[i].edit.id), +vo.dataset.edVoice);
     });
     if (opened) { panel().hidden = false; checkMe().then(draw) }
     draw();
   }
-  return { init, draw };
+  // AI 對話練習（jp-roleplay）：一行一個 JSON，邊收邊顯示
+  async function roleplay(lesson, turns, onText) {
+    const t = await token();
+    if (!t) { open(); throw { shown: "請先登入。" } }
+    const r = await fetch(`${REMOTE.url}/functions/v1/jp-roleplay`, { method: "POST", headers: { apikey: REMOTE.key, Authorization: `Bearer ${t}`, "Content-Type": "application/json" }, body: JSON.stringify({ lesson, turns }) });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      if (r.status === 401) { logout(); open() }
+      throw { shown: d.error || "AI 沒有回應，請再送一次。" };
+    }
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = "", text = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split("\n"); buf = lines.pop();
+      for (const l of lines) {
+        if (!l.trim()) continue;
+        const m = JSON.parse(l);
+        if (m.type === "text") { text += m.text; onText({ text }) }
+        else if (m.type === "error") throw { shown: m.message };
+      }
+    }
+    if (!text) throw { shown: "AI 沒有回應，請再送一次。" };
+    return { text };
+  }
+  async function open() { panel().hidden = false; await checkMe(); draw() }
+  return { init, draw, roleplay, open, signedIn: () => !!auth, onAuth: f => { authListener = f } };
 })();
 async function boot() {
   if (!DATA && REMOTE) {
